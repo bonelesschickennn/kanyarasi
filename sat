@@ -1,0 +1,247 @@
+from flask import Flask, request, session, send_file
+import random, os, qrcode
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Image, Spacer
+from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.lib.pagesizes import A4
+
+app = Flask(__name__)
+app.secret_key = "kanyarasi_final"
+
+# -------- DATA --------
+zones = {
+    "North Stand": 1500,
+    "South A": 1200,
+    "South B": 1200,
+    "East Ground": 3000,
+    "West Ground": 3000,
+    "East First": 2000,
+    "West First": 2000
+}
+
+parking_data = {"A":[0]*5, "B":[0]*5}
+bookings = []
+parking_records = []
+
+# -------- PARKING --------
+def allocate_parking(vehicle, booking_id):
+    for b in ["A","B"]:
+        for f in range(5):
+            if parking_data[b][f] < 100:
+                parking_data[b][f] += 1
+
+                record = {
+                    "vehicle": vehicle,
+                    "building": b,
+                    "floor": f,
+                    "slot": parking_data[b][f],
+                    "count": parking_data[b][f],
+                    "booking_id": booking_id
+                }
+                parking_records.append(record)
+
+                return f"Building {b} | Floor {f} | Slot {parking_data[b][f]} | Floor Count: {parking_data[b][f]}"
+    return "Parking Full"
+
+# -------- UI TEMPLATE --------
+def page(title, body):
+    return f"""
+    <html>
+    <head>
+    <style>
+    body {{
+        font-family: Arial;
+        background: linear-gradient(to right, #141e30, #243b55);
+        color: white;
+        text-align: center;
+    }}
+    .card {{
+        background: white;
+        color: black;
+        padding: 20px;
+        border-radius: 15px;
+        width: 350px;
+        margin: auto;
+        box-shadow: 0 0 20px rgba(0,0,0,0.3);
+    }}
+    input, select, textarea {{
+        width: 90%;
+        padding: 8px;
+        margin: 5px;
+        border-radius: 5px;
+    }}
+    button {{
+        background: #ff4b2b;
+        color: white;
+        padding: 10px;
+        border: none;
+        border-radius: 8px;
+    }}
+    table {{
+        width: 90%;
+        margin: auto;
+        background: white;
+        color: black;
+        border-collapse: collapse;
+    }}
+    th, td {{ padding: 10px; border: 1px solid #ddd; }}
+    </style>
+    </head>
+    <body>
+    <h1>📱 KANYARASI</h1>
+    {body}
+    <br><a href="/">Home</a> | <a href="/admin">Admin</a>
+    </body>
+    </html>
+    """
+
+# -------- HOME --------
+@app.route('/')
+def home():
+    options = "".join([f"<option>{z} - ₹{p}</option>" for z,p in zones.items()])
+    body = f"""
+    <div class="card">
+    <h3>🏟️ Stadium Booking</h3>
+    <form method="post" action="/send_otp">
+
+    <input name="name" placeholder="Name" required>
+    <input name="email" placeholder="Email">
+    <input name="mobile" placeholder="Mobile" required>
+    <textarea name="address" placeholder="Address"></textarea>
+
+    <select name="zone">{options}</select>
+    <input name="persons" placeholder="Persons">
+
+    <select name="parking">
+    <option>No Parking</option>
+    <option>With Parking</option>
+    </select>
+
+    <input name="vehicle" placeholder="Vehicle Number">
+
+    <button>Send OTP</button>
+    </form>
+    </div>
+    """
+    return page("Home", body)
+
+# -------- OTP --------
+@app.route('/send_otp', methods=['POST'])
+def otp():
+    session['data'] = request.form.to_dict()
+    session['otp'] = str(random.randint(1000,9999))
+
+    return page("OTP", f"""
+    <div class="card">
+    <h3>OTP: {session['otp']}</h3>
+    <form method=post action="/verify">
+    <input name=otp placeholder="Enter OTP">
+    <button>Verify</button>
+    </form>
+    </div>
+    """)
+
+# -------- VERIFY --------
+@app.route('/verify', methods=['POST'])
+def verify():
+    if request.form['otp'] != session.get('otp'):
+        return page("Error", "<h3>Invalid OTP</h3>")
+
+    d = session['data']
+
+    name = d['name']
+    email = d['email']
+    mobile = d['mobile']
+    address = d['address']
+    vehicle = d['vehicle']
+
+    zone = d['zone'].split(" - ")[0]
+    persons = int(d['persons']) if d['persons'] else 1
+    total = zones[zone] * persons
+
+    booking_id = str(random.randint(10**11,10**12-1))
+
+    if d['parking'] == "With Parking":
+        parking = allocate_parking(vehicle, booking_id)
+    else:
+        parking = "No Parking"
+
+    # QR
+    os.makedirs("static", exist_ok=True)
+    qr_path = f"static/{booking_id}.png"
+    qrcode.make(booking_id).save(qr_path)
+
+    # PDF
+    pdf = f"{booking_id}.pdf"
+    doc = SimpleDocTemplate(pdf, pagesize=A4)
+    styles = getSampleStyleSheet()
+
+    content = [
+        Paragraph("<b>RCB vs SRH Ticket</b>", styles['Title']),
+        Paragraph("Chatrapati Shivaji Maharaj Stadium", styles['Normal']),
+        Paragraph(f"Booking ID: {booking_id}", styles['Normal']),
+        Paragraph(f"Name: {name}", styles['Normal']),
+        Paragraph(f"Mobile: {mobile}", styles['Normal']),
+        Paragraph(f"Address: {address}", styles['Normal']),
+        Paragraph(f"Zone: {zone}", styles['Normal']),
+        Paragraph(f"Persons: {persons}", styles['Normal']),
+        Paragraph(f"Total: ₹{total}", styles['Normal']),
+        Paragraph(f"Parking: {parking}", styles['Normal']),
+        Spacer(1,20),
+        Image(qr_path,150,150)
+    ]
+    doc.build(content)
+
+    bookings.append({"id":booking_id,"name":name,"zone":zone,"total":total})
+
+    return page("Success", f"""
+    <h2>Booking Confirmed 🎉</h2>
+    <p>ID: {booking_id}</p>
+    <p>{parking}</p>
+    <a href="/download/{booking_id}">Download Ticket PDF</a>
+    """)
+
+# -------- DOWNLOAD --------
+@app.route('/download/<bid>')
+def download(bid):
+    file = f"{bid}.pdf"
+    if os.path.exists(file):
+        return send_file(file, as_attachment=True)
+    return "File not found"
+
+# -------- ADMIN --------
+@app.route('/admin')
+def admin():
+    rows = "".join([
+        f"<tr><td>{b['id']}</td><td>{b['name']}</td><td>{b['zone']}</td><td>{b['total']}</td></tr>"
+        for b in bookings
+    ])
+
+    return page("Admin", f"""
+    <h2>Admin Dashboard</h2>
+    <table>
+    <tr><th>ID</th><th>Name</th><th>Zone</th><th>Total</th></tr>
+    {rows}
+    </table>
+    <br><a href="/parking_sheet">Parking Register</a>
+    """)
+
+# -------- PARKING SHEET --------
+@app.route('/parking_sheet')
+def parking_sheet():
+    rows = "".join([
+        f"<tr><td>{r['vehicle']}</td><td>{r['building']}</td><td>{r['floor']}</td><td>{r['slot']}</td><td>{r['booking_id']}</td></tr>"
+        for r in parking_records
+    ])
+
+    return page("Parking", f"""
+    <h2>Parking Register</h2>
+    <table>
+    <tr><th>Vehicle</th><th>Building</th><th>Floor</th><th>Slot</th><th>Booking ID</th></tr>
+    {rows}
+    </table>
+    """)
+
+# -------- RUN --------
+if __name__ == "__main__":
+    if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=10000)
